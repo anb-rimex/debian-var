@@ -40,7 +40,7 @@ readonly G_VARISCITE_PATH="${DEF_BUILDENV}/variscite"
 
 ## LINUX kernel: git, config, paths and etc
 readonly G_LINUX_KERNEL_SRC_DIR="${DEF_SRC_DIR}/kernel"
-readonly G_LINUX_KERNEL_GIT="https://github.com/varigit/linux-imx.git"
+readonly G_LINUX_KERNEL_GIT="https://github.com/anb-rimex/linux-imx.git"
 readonly G_LINUX_KERNEL_BRANCH="imx_4.9.11_1.0.0_ga-var01"
 readonly G_LINUX_KERNEL_REV="a1ac1724c29c3d2051b68d8c0d743de22e0632e3"
 readonly G_LINUX_KERNEL_DEF_CONFIG='imx_v7_var_defconfig'
@@ -48,7 +48,7 @@ readonly G_LINUX_DTB='imx6ul-var-dart-emmc_wifi.dtb imx6ul-var-dart-nand_wifi.dt
 
 ## uboot
 readonly G_UBOOT_SRC_DIR="${DEF_SRC_DIR}/uboot"
-readonly G_UBOOT_GIT="https://github.com/varigit/uboot-imx.git"
+readonly G_UBOOT_GIT="https://github.com/anb-rimex/uboot-imx.git"
 readonly G_UBOOT_BRANCH="imx_v2017.03_4.9.11_1.0.0_ga_var01"
 readonly G_UBOOT_REV="3b5f889cb501c9fbe44c750c657dcd9ea4875176"
 readonly G_UBOOT_DEF_CONFIG_MMC='mx6ul_var_dart_mmc_defconfig'
@@ -60,7 +60,7 @@ readonly G_SPL_NAME_FOR_NAND='SPL.nand'
 
 ## Broadcom BT/WIFI firmware ##
 readonly G_BCM_FW_SRC_DIR="${DEF_SRC_DIR}/bcmfw"
-readonly G_BCM_FW_GIT="git://github.com/varigit/bcm_4343w_fw.git"
+readonly G_BCM_FW_GIT="git://github.com/anb-rimex/bcm_4343w_fw.git"
 readonly G_BCM_FW_GIT_BRANCH="3.5.5.18"
 readonly G_BCM_FW_GIT_REV="423be46b06b5629e45a4943f98a3053c819091ce"
 
@@ -110,6 +110,7 @@ function usage() {
 	echo "       rtar        -- generate or regenerate rootfs.tar.gz image from rootfs folder "
 	echo "       clean       -- clean all build artifacts (not delete sources code and resulted images (output folder))"
 	echo "       sdcard      -- create bootting sdcard for this device"
+	echo "       sdcardwc    -- create bootting sdcard for this device without copy rfs" 
 	echo "  -o|--output -- custom select output directory (default: \"${PARAM_OUTPUT_DIR}\")"
 	echo "  -d|--dev    -- select sdcard device (exmple: -d /dev/sde)"
 	echo "  --debug     -- enable debug mode for this script"
@@ -915,6 +916,193 @@ EOF
 	return 0;
 }
 
+# make sdcard for device
+# $1 -- block device
+# $2 -- output images dir
+function make_sdcard_without_copy() {
+	readonly local LPARAM_BLOCK_DEVICE=${1}
+	readonly local LPARAM_OUTPUT_DIR=${2}
+	readonly local P1_MOUNT_DIR="${G_TMP_DIR}/p1"
+	readonly local P2_MOUNT_DIR="${G_TMP_DIR}/p2"
+	readonly local DEBIAN_IMAGES_TO_ROOTFS_POINT="opt/images/Debian"
+
+	readonly local BOOTLOAD_RESERVE=4
+	readonly local BOOT_ROM_SIZE=8
+	readonly local SPARE_SIZE=0
+
+	make_prepare;
+
+	[ "${LPARAM_BLOCK_DEVICE}" = "na" ] && {
+		pr_warning "No valid block device: ${LPARAM_BLOCK_DEVICE}"
+		return 1;
+	};
+
+	local part=""
+	if [ `echo ${LPARAM_BLOCK_DEVICE} | grep -c mmcblk` -ne 0 ]; then
+		part="p"
+	fi
+
+	# Check that we're using a valid device
+	if ! check_sdcard ${LPARAM_BLOCK_DEVICE}; then
+		return 1
+	fi
+
+	for ((i=0; i<10; i++))
+	do
+		if [ `mount | grep -c ${LPARAM_BLOCK_DEVICE}${part}$i` -ne 0 ]; then
+			umount ${LPARAM_BLOCK_DEVICE}${part}$i
+		fi
+	done
+
+	# Call sfdisk to get total card size
+	local TOTAL_SIZE=`sfdisk -s ${LPARAM_BLOCK_DEVICE}`
+	local TOTAL_SIZE=`expr ${TOTAL_SIZE} / 1024`
+	local ROOTFS_SIZE=`expr ${TOTAL_SIZE} - ${BOOTLOAD_RESERVE} - ${BOOT_ROM_SIZE} - ${SPARE_SIZE}`
+
+	function format_sdcard
+	{
+		pr_info "Formating SDCARD partitions"
+		mkfs.vfat ${LPARAM_BLOCK_DEVICE}${part}1 -n BOOT-VARSOM
+		mkfs.ext4 ${LPARAM_BLOCK_DEVICE}${part}2 -L rootfs
+	}
+
+	function flash_u-boot
+	{
+		pr_info "Flashing U-Boot"
+		dd if=${LPARAM_OUTPUT_DIR}/${G_SPL_NAME_FOR_EMMC} of=${LPARAM_BLOCK_DEVICE} bs=1K seek=1; sync
+		dd if=${LPARAM_OUTPUT_DIR}/${G_UBOOT_NAME_FOR_EMMC} of=${LPARAM_BLOCK_DEVICE} bs=1K seek=69; sync
+	}
+
+	function flash_sdcard
+	{
+		pr_info "Flashing \"BOOT-VARSOM\" partition"
+		cp ${LPARAM_OUTPUT_DIR}/*.dtb	${P1_MOUNT_DIR}/
+		cp ${LPARAM_OUTPUT_DIR}/zImage	${P1_MOUNT_DIR}/zImage
+		sync
+
+		pr_info "Flashing \"rootfs\" partition"
+		tar -xpf ${LPARAM_OUTPUT_DIR}/${DEF_ROOTFS_TARBAR_NAME} -C ${P2_MOUNT_DIR}/
+	}
+
+	function copy_debian_images
+	{
+		mkdir -p ${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}
+
+		pr_info "Copying Debian images to /${DEBIAN_IMAGES_TO_ROOTFS_POINT}"
+		cp ${LPARAM_OUTPUT_DIR}/zImage 						${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/
+		cp ${LPARAM_OUTPUT_DIR}/${DEF_ROOTFS_TARBAR_NAME}	${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/${DEF_ROOTFS_TARBAR_NAME}
+		cp ${LPARAM_OUTPUT_DIR}/${G_UBI_FILE_NAME}			${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/${G_UBI_FILE_NAME}
+
+		cp ${LPARAM_OUTPUT_DIR}/*.dtb						${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/
+
+		pr_info "Copying NAND U-Boot to /${DEBIAN_IMAGES_TO_ROOTFS_POINT}"
+		cp ${LPARAM_OUTPUT_DIR}/${G_SPL_NAME_FOR_NAND}		${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/
+		cp ${LPARAM_OUTPUT_DIR}/${G_UBOOT_NAME_FOR_NAND}	${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/
+
+		pr_info "Copying MMC U-Boot to /${DEBIAN_IMAGES_TO_ROOTFS_POINT}"
+		cp ${LPARAM_OUTPUT_DIR}/${G_SPL_NAME_FOR_EMMC}		${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/
+		cp ${LPARAM_OUTPUT_DIR}/${G_UBOOT_NAME_FOR_EMMC}	${P2_MOUNT_DIR}/${DEBIAN_IMAGES_TO_ROOTFS_POINT}/
+
+		return 0;
+	}
+
+	function copy_scripts
+	{
+		pr_info "Copying scripts to /${DEBIAN_IMAGES_TO_ROOTFS_POINT}"
+		cp ${G_VARISCITE_PATH}/debian-emmc.sh	${P2_MOUNT_DIR}/usr/sbin/
+		cp ${G_VARISCITE_PATH}/debian-nand.sh	${P2_MOUNT_DIR}/usr/sbin/
+		cp ${G_VARISCITE_PATH}/kobs-ng		${P2_MOUNT_DIR}/usr/sbin/
+	
+		# added exec options
+		chmod +x ${P2_MOUNT_DIR}/usr/sbin/debian-emmc.sh ${P2_MOUNT_DIR}/usr/sbin/debian-nand.sh ${P2_MOUNT_DIR}/usr/sbin/kobs-ng
+	}
+
+	function ceildiv
+	{
+		local num=$1
+		local div=$2
+		echo $(( (num + div - 1) / div ))
+	}
+
+	# Delete the partitions
+	for ((i=0; i<10; i++))
+	do
+		if [ `ls ${LPARAM_BLOCK_DEVICE}${part}$i 2> /dev/null | grep -c ${LPARAM_BLOCK_DEVICE}${part}$i` -ne 0 ]; then
+			dd if=/dev/zero of=${LPARAM_BLOCK_DEVICE}${part}$i bs=512 count=1024
+		fi
+	done
+	sync
+
+	((echo d; echo 1; echo d; echo 2; echo d; echo 3; echo d; echo w) | fdisk ${LPARAM_BLOCK_DEVICE} &> /dev/null) || true
+	sync
+
+	dd if=/dev/zero of=${LPARAM_BLOCK_DEVICE} bs=1024 count=4096
+	sleep 2; sync;
+
+	pr_info "Creating new partitions"
+
+	# Create a new partition table
+fdisk ${LPARAM_BLOCK_DEVICE} <<EOF
+n
+p
+1
+8192
+24575
+t
+c
+n
+p
+2
+24576
+
+p
+w
+EOF
+	sleep 2; sync;
+
+	# Get total card size
+	total_size=`sfdisk -s ${LPARAM_BLOCK_DEVICE}`
+	total_size=`expr ${total_size} / 1024`
+	boot_rom_sizeb=`expr ${BOOT_ROM_SIZE} + ${BOOTLOAD_RESERVE}`
+	rootfs_size=`expr ${total_size} - ${boot_rom_sizeb} - ${SPARE_SIZE}`
+
+	pr_info "ROOT SIZE=${rootfs_size} TOTAl SIZE=${total_size} BOOTROM SIZE=${boot_rom_sizeb}"
+	sleep 2; sync;
+
+	# Format the partitions
+	format_sdcard
+	sleep 2; sync;
+
+	flash_u-boot
+	sleep 2; sync;
+
+	# Mount the partitions
+	mkdir -p ${P1_MOUNT_DIR}
+	mkdir -p ${P2_MOUNT_DIR}
+	sync
+
+	mount ${LPARAM_BLOCK_DEVICE}${part}1  ${P1_MOUNT_DIR}
+	mount ${LPARAM_BLOCK_DEVICE}${part}2  ${P2_MOUNT_DIR}
+	sleep 2; sync;
+
+	flash_sdcard
+	#copy_debian_images
+	#copy_scripts
+
+	pr_info "Sync sdcard..."
+	sync
+	umount ${P1_MOUNT_DIR}
+	umount ${P2_MOUNT_DIR}
+
+	rm -rf ${P1_MOUNT_DIR}
+	rm -rf ${P2_MOUNT_DIR}
+
+	pr_info "Done make sdcard without copy!"
+
+	return 0;
+}
+
+
 # make firmware for wl bcm module
 # $1 -- bcm git directory
 # $2 -- rootfs output dir
@@ -1077,6 +1265,18 @@ function cmd_make_sdcard() {
 	return 0;
 }
 
+function cmd_make_sdcard_without_copy() {
+	make_prepare;
+
+	make_sdcard_without_copy ${PARAM_BLOCK_DEVICE} ${PARAM_OUTPUT_DIR} || {
+		pr_error "Failed #$? in function make_sdcard"
+		return 1;
+	};
+
+	return 0;
+}
+
+
 function cmd_make_bcmfw() {
 	make_prepare
 
@@ -1157,6 +1357,11 @@ case $PARAM_CMD in
 		;;
 	sdcard )
 		cmd_make_sdcard || {
+			V_RET_CODE=1;
+		};
+		;;
+	sdcardwc )
+		cmd_make_sdcard_without_copy || {
 			V_RET_CODE=1;
 		};
 		;;
