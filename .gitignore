@@ -70,6 +70,7 @@ src
 toolchain
 tmp
 sd
+sd20180604
 
 *.orig
 *~
